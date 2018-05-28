@@ -1,4 +1,4 @@
-xquery version "3.1";
+xquery version "3.0";
 
 (: Namespace for backup files :)
 declare namespace exist = "http://exist.sourceforge.net/NS/exist";
@@ -9,28 +9,33 @@ declare option exist:serialize "method=hml media-type=text/html";
 
 (:~ Upload. Gives root collection from a zip :)
 declare function local:getRootCol($zip) as xs:string {
+  
   let $dataCb := function($path as xs:anyURI, $type as xs:string, $data as item()?, $param as item()*) as item ()?
   { $path }
+  
   let $entryCb := function($path as xs:anyURI, $type as xs:string, $param as item()*) as xs:boolean
   { contains($path,"__contents__.xml") }
+  
   let $paths := compression:unzip($zip, $entryCb, (), $dataCb, ())
+  
   let $min := min($paths[. != ''])
   let $toks := tokenize($min, "/")
   let $colName := "/" || string-join(subsequence($toks, 1, count($toks) - 1), "/")
+
   return $colName
 };
 
 (:~ Upload. Set permissions on collection and ressources from "__contents__.xml"  :)
 declare function local:setPermissionsFromContent($col) as xs:boolean? {
+  
   (: Permissions on collection :)
   let $content := doc ($col||"/__contents__.xml")/exist:collection
   let $owner := $content/@owner 
   let $group := $content/@group
   let $mode := $content/@mode
-  let $mode := util:base-to-integer($mode, 8)
-  let $void := xmldb:chmod-collection($col, $mode)
-  let $void := sm:chown(xs:anyURI ($col), $owner)
-  let $void := sm:chgrp(xs:anyURI ($col), $group)
+  let $void := if($mode) then xmldb:chmod-collection($col, util:base-to-integer($mode, 8)) else()
+  let $void := if($owner) then sm:chown(xs:anyURI ($col), $owner) else ()
+  let $void := if ($group) then sm:chgrp(xs:anyURI ($col), $group) else ()
 
   (: Permissions on resources :)
   let $void := for $r in $content/exist:resource return 
@@ -73,8 +78,7 @@ declare function local:entry-data($path as xs:anyURI, $type as xs:string, $data 
       
   (: Write xml $data :)
   let $store := xmldb:store($colName, $docName, $data)
-  return if (contains($store, "__contents__.xml")) then () 
-    else <div>{ $store }</div> 
+  return <div>{ $store }</div> 
 };
 
 (:~ Download. Add "__contents__.xml" for zip creation :)
@@ -98,8 +102,8 @@ declare function local:add__contents__($colName as xs:string) as item ()? {
           <subcollection name="{ $c }" filename="{ $c }" null="{$void}"/>
 
       (: Resources at this level :)
-      , for $r in xmldb:get-child-resources($colName)
-        where not($r = '__contents__.xml')
+      , for $r in xmldb:get-child-resources($colName)[. != __contents__.xml]
+(:        where not($r = '__contents__.xml'):)
         let $p := sm:get-permissions(xs:anyURI($colName || '/' || $r))/sm:permission
         return
           <resource type="XMLResource" name="{$r}" owner="{$p/@owner}" group="{$p/@group}" mode="{sm:mode-to-octal($p/@mode)}"
@@ -115,12 +119,15 @@ declare function local:add__contents__($colName as xs:string) as item ()? {
 
 (:~ Download. Remove "__contents__.xml" after zip creation :)
 declare function local:remove__contents__($colName as xs:string) as item()* {
+  
   let $colNames := if (doc-available($colName || "/__contents__.xml")) 
     then xmldb:remove($colName, "__contents__.xml")
     else ()
+    
   let $cols := for $c in xmldb:get-child-collections($colName)
     (: Recurse :)
     return local:remove__contents__($colName || '/' || $c)
+    
   return () 
 };
 
@@ -130,9 +137,11 @@ let $done :=
     let $ouv := request:get-parameter("collection", "")
     let $collection := "/db/" || $ouv || "/"
     let $name := $ouv || ".zip"
+    
     let $void := local:add__contents__($collection)
     let $zip := compression:zip(xs:anyURI($collection), true())
     let $void := local:remove__contents__($collection)
+    
     return
     (
       response:set-header("Content-Disposition", concat("attachment; filename=", $name)),
@@ -146,10 +155,15 @@ let $done := if (request:get-parameter("action", ()) = "Upload") then
   let $zipFile :=  request:get-uploaded-file-data("zipFile")
   let $unzip :=
     try {
-      let $unzip := compression:unzip($zipFile, local:entry-filter # 3, (), local:entry-data # 4, ())
       let $rootCol := local:getRootCol($zipFile)
+      let $void := if ( request:get-parameter("delete", ()) = "yes" and xmldb:collection-available($rootCol) ) 
+        then ( xmldb:remove($rootCol) ) 
+        else ()
+        
+      let $unzip := compression:unzip($zipFile, local:entry-filter # 3, (), local:entry-data # 4, ())
       let $void := local:setPermissionsFromContent($rootCol)
       let $void := local:remove__contents__($rootCol)
+      
       return $unzip
     } catch * {
       util:log-system-out("Error:" || $err:description)
@@ -181,6 +195,7 @@ let $page :=
             <option value="{ $col }">{ $col }</option>
             (: One level of subcollections :)
             , for $c in xmldb:get-child-collections($col)
+             order by $c
             return <option value="{ $col||"/"||$c }">{ $col||"/"||$c }</option>
           )
       }
@@ -194,7 +209,9 @@ let $page :=
       <input type="hidden" name="action" value="Upload" />
       <label for="zipFile">Choose zip :&#160;</label>
       <input type="file" id="zipFile" name="zipFile" style="display:none"onchange="getElementById('form').submit();"/>
-      <button class="btn btn-default" onclick="event.preventDefault();getElementById('zipFile').click();">Upload</button>
+      <button class="btn btn-default" onclick="event.preventDefault();getElementById('zipFile').click();">Upload</button><br/>
+      <input type="checkbox" id="deleteId" name="delete" value="yes"/>
+      <label for="deleteId">Delete before</label>
     </form>
 
     <!-- Result -->
